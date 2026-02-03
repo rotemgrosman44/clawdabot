@@ -1,0 +1,44 @@
+# --- Jarvis Second Brain / Codex safety ---
+# Never commit secrets / env files
+.env
+.env.*
+*.env
+
+# Common secret-ish files
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# Logs / runtime artifacts
+*.log
+logs/
+tmp/
+temp/
+
+# Node / JS
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.DS_Store
+
+# Build artifacts / caches
+dist/
+.cache/
+coverage/
+
+# IDE
+.vscode/
+.idea/
+
+# OS / editor junk
+*.swp
+*.swo
+*~
+
+# Safety: do not commit local overrides
+*.local
