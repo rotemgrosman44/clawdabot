@@ -1,0 +1,262 @@
+--- /home/rotemgrosman/jarvis-stack/jarvis-data/backups/voice-tts-20260208-195152/dist/tts/tts.js	2026-02-05 15:50:07.318797788 +0200
++++ /home/rotemgrosman/.npm-global/lib/node_modules/clawdbot/dist/tts/tts.js	2026-02-08 19:49:44.162800848 +0200
+@@ -1,4 +1,4 @@
+-import { existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, renameSync, unlinkSync, } from "node:fs";
++import { existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, renameSync, unlinkSync, statSync, } from "node:fs";
+ import { tmpdir } from "node:os";
+ import path from "node:path";
+ import { completeSimple } from "@mariozechner/pi-ai";
+@@ -1048,7 +1048,18 @@
+         prefsPath,
+         sessionAuto: params.ttsAuto,
+     });
+-    if (autoMode === "off")
++    const channelId = resolveChannelId(params.channel);
++    const telegramVoiceReplyMode = resolveTelegramVoiceReplyMode(params.cfg);
++    const telegramVoiceReplyMaxWords = resolveTelegramVoiceReplyMaxWords(params.cfg);
++    const telegramOverLimitBehavior = resolveTelegramVoiceReplyOverLimitBehavior(params.cfg);
++    const effectiveAutoMode = channelId === "telegram"
++        ? telegramVoiceReplyMode === "never_voice"
++            ? "off"
++            : telegramVoiceReplyMode === "always_voice"
++                ? "always"
++                : "inbound" // default: voice_on_voice
++        : autoMode;
++    if (effectiveAutoMode === "off")
+         return params.payload;
+     const text = params.payload.text ?? "";
+     const directives = parseTtsDirectives(text, config.modelOverrides);
+@@ -1065,9 +1076,9 @@
+             ...params.payload,
+             text: visibleText.length > 0 ? visibleText : undefined,
+         };
+-    if (autoMode === "tagged" && !directives.hasDirective)
++    if (effectiveAutoMode === "tagged" && !directives.hasDirective)
+         return nextPayload;
+-    if (autoMode === "inbound" && params.inboundAudio !== true)
++    if (effectiveAutoMode === "inbound" && params.inboundAudio !== true)
+         return nextPayload;
+     const mode = config.mode ?? "final";
+     if (mode === "final" && params.kind && params.kind !== "final")
+@@ -1080,8 +1091,50 @@
+         return nextPayload;
+     if (ttsText.trim().length < 10)
+         return nextPayload;
+-    const maxLength = getTtsMaxLength(prefsPath);
+     let textForAudio = ttsText.trim();
++    const shouldAttemptTelegramVoice = channelId === "telegram" && (telegramVoiceReplyMode === "always_voice" || params.inboundAudio === true);
++    if (shouldAttemptTelegramVoice) {
++        const wordCount = countWords(visibleText || ttsText);
++        if (wordCount > telegramVoiceReplyMaxWords) {
++            if (telegramOverLimitBehavior !== "summarize_then_voice") {
++                logVerbose(`[telegram] voice_reply=skipped reason=over_limit words=${wordCount} limit=${telegramVoiceReplyMaxWords}`);
++                return nextPayload;
++            }
++            // Use the existing summarizer (character-based) as a best-effort way to satisfy the word policy.
++            // If we still exceed the word cap after summarization, fall back to text.
++            try {
++                const maxChars = getTtsMaxLength(prefsPath);
++                const targetChars = Math.min(maxChars, Math.max(250, telegramVoiceReplyMaxWords * 8));
++                const summary = await summarizeText({
++                    text: textForAudio,
++                    targetLength: targetChars,
++                    cfg: params.cfg,
++                    config,
++                    timeoutMs: config.timeoutMs,
++                });
++                const summarized = summary.summary.trim();
++                const summarizedWords = countWords(summarized);
++                if (summarizedWords > telegramVoiceReplyMaxWords) {
++                    logVerbose(`[telegram] voice_reply=skipped reason=over_limit_after_summary words=${summarizedWords} limit=${telegramVoiceReplyMaxWords}`);
++                    return nextPayload;
++                }
++                // Replace audio text; keep visible text as-is.
++                textForAudio = summarized;
++            }
++            catch (err) {
++                logVerbose(`[telegram] voice_reply=skipped reason=summary_error err=${String(err)}`);
++                return nextPayload;
++            }
++        }
++        // Telegram voice replies must be ElevenLabs (do not fall back to MP3 or other providers).
++        const elevenKey = resolveTtsApiKey(config, "elevenlabs");
++        if (!elevenKey) {
++            logVerbose(`[tts] provider=elevenlabs err=no_key`);
++            logVerbose("[telegram] voice_reply=skipped reason=no_key");
++            return nextPayload;
++        }
++    }
++    const maxLength = getTtsMaxLength(prefsPath);
+     let wasSummarized = false;
+     if (textForAudio.length > maxLength) {
+         if (!isSummarizationEnabled(prefsPath)) {
+@@ -1115,7 +1168,12 @@
+         cfg: params.cfg,
+         prefsPath,
+         channel: params.channel,
+-        overrides: directives.overrides,
++        overrides: shouldAttemptTelegramVoice
++            ? {
++                ...directives.overrides,
++                provider: "elevenlabs",
++            }
++            : directives.overrides,
+     });
+     if (result.success && result.audioPath) {
+         lastTtsAttempt = {
+@@ -1126,8 +1184,18 @@
+             provider: result.provider,
+             latencyMs: result.latencyMs,
+         };
+-        const channelId = resolveChannelId(params.channel);
+-        const shouldVoice = channelId === "telegram" && result.voiceCompatible === true;
++        const shouldVoice = channelId === "telegram" && shouldAttemptTelegramVoice && result.voiceCompatible === true;
++        let bytes;
++        try {
++            bytes = statSync(result.audioPath).size;
++        }
++        catch {
++            bytes = undefined;
++        }
++        logVerbose(`[tts] provider=${result.provider} format=${result.outputFormat ?? "unknown"} ok bytes=${bytes ?? "unknown"} latency_ms=${result.latencyMs ?? "unknown"}`);
++        if (channelId === "telegram" && shouldAttemptTelegramVoice) {
++            logVerbose(`[telegram] voice_reply=${shouldVoice ? "prepared" : "skipped"} reason=${shouldVoice ? "ok" : "not_voice_compatible"}`);
++        }
+         return {
+             ...nextPayload,
+             mediaUrl: result.audioPath,
+@@ -1143,6 +1211,11 @@
+     };
+     const latency = Date.now() - ttsStart;
+     logVerbose(`TTS: conversion failed after ${latency}ms (${result.error ?? "unknown"}).`);
++    if (channelId === "telegram" && shouldAttemptTelegramVoice) {
++        const noKey = typeof result.error === "string" && /No API key/i.test(result.error);
++        logVerbose(`[tts] provider=elevenlabs err=${noKey ? "no_key" : "error"} message=${result.error ?? "unknown"}`);
++        logVerbose(`[telegram] voice_reply=skipped reason=${noKey ? "no_key" : "error"}`);
++    }
+     return nextPayload;
+ }
+ export const _test = {
+@@ -1157,3 +1230,34 @@
+     resolveOutputFormat,
+     resolveEdgeOutputFormat,
+ };
++
++function countWords(text) {
++    const trimmed = (text ?? "").trim();
++    if (!trimmed)
++        return 0;
++    return trimmed.split(/\s+/).filter(Boolean).length;
++}
++
++function resolveTelegramVoiceReplyMode(cfg) {
++    const raw = cfg?.channels?.telegram?.voiceReplyMode;
++    if (raw === "always_voice" || raw === "never_voice" || raw === "voice_on_voice") {
++        return raw;
++    }
++    return "voice_on_voice";
++}
++
++function resolveTelegramVoiceReplyMaxWords(cfg) {
++    const raw = cfg?.channels?.telegram?.voiceReplyMaxWords;
++    if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
++        return Math.floor(raw);
++    }
++    return 250;
++}
++
++function resolveTelegramVoiceReplyOverLimitBehavior(cfg) {
++    const raw = cfg?.channels?.telegram?.voiceReplyOverLimitBehavior;
++    if (raw === "summarize_then_voice" || raw === "text") {
++        return raw;
++    }
++    return "text";
++}
+--- /home/rotemgrosman/jarvis-stack/jarvis-data/backups/voice-tts-20260208-195152/dist/telegram/bot-message-context.js	2026-02-05 15:50:06.868795826 +0200
++++ /home/rotemgrosman/.npm-global/lib/node_modules/clawdbot/dist/telegram/bot-message-context.js	2026-02-08 19:49:58.425127016 +0200
+@@ -186,6 +186,14 @@
+         rawBody = placeholder;
+     if (!rawBody && allMedia.length === 0)
+         return null;
++    const inboundType = msg.voice
++        ? "voice"
++        : msg.audio
++            ? "audio"
++            : rawTextSource && rawTextSource.trim()
++                ? "text"
++                : "other";
++    logger.info(`[telegram] inbound_type=${inboundType} chat_id=${chatId} message_id=${msg.message_id}`);
+     let bodyText = rawBody;
+     if (!bodyText && allMedia.length > 0) {
+         bodyText = `<media:image>${allMedia.length > 1 ? ` (${allMedia.length} images)` : ""}`;
+--- /home/rotemgrosman/jarvis-stack/jarvis-data/backups/voice-tts-20260208-195152/dist/telegram/bot/delivery.js	2026-02-05 15:50:07.010796445 +0200
++++ /home/rotemgrosman/.npm-global/lib/node_modules/clawdbot/dist/telegram/bot/delivery.js	2026-02-08 19:50:08.200107603 +0200
+@@ -131,6 +131,7 @@
+                         await bot.api.sendVoice(chatId, file, {
+                             ...mediaParams,
+                         });
++                        logVerbose(`[telegram] voice_reply=sent chat_id=${chatId} file=${fileName} content_type=${media.contentType ?? "unknown"}`);
+                     }
+                     catch (voiceErr) {
+                         // Fall back to text if voice messages are forbidden in this chat.
+@@ -142,6 +143,7 @@
+                                 throw voiceErr;
+                             }
+                             logVerbose("telegram sendVoice forbidden (recipient has voice messages blocked in privacy settings); falling back to text");
++                            logVerbose(`[telegram] voice_reply=skipped reason=forbidden chat_id=${chatId}`);
+                             hasReplied = await sendTelegramVoiceFallbackText({
+                                 bot,
+                                 chatId,
+--- /home/rotemgrosman/jarvis-stack/jarvis-data/backups/voice-tts-20260208-195152/dist/gateway/server-startup.js	2026-02-05 15:50:07.280797622 +0200
++++ /home/rotemgrosman/.npm-global/lib/node_modules/clawdbot/dist/gateway/server-startup.js	2026-02-08 19:50:20.101264132 +0200
+@@ -18,16 +18,22 @@
+         params.logBrowser.error(`server failed to start: ${String(err)}`);
+     }
+     // Start Gmail watcher if configured (hooks.gmail.account).
+-    if (!isTruthyEnvValue(process.env.CLAWDBOT_SKIP_GMAIL_WATCHER)) {
++    if (isTruthyEnvValue(process.env.CLAWDBOT_SKIP_GMAIL_WATCHER)) {
++        params.logHooks.info("[gmail] disabled reason=skip_env");
++    }
++    else {
+         try {
+             const gmailResult = await startGmailWatcher(params.cfg);
+             if (gmailResult.started) {
+-                params.logHooks.info("gmail watcher started");
++                params.logHooks.info("[gmail] started");
+             }
+-            else if (gmailResult.reason &&
+-                gmailResult.reason !== "hooks not enabled" &&
+-                gmailResult.reason !== "no gmail account configured") {
+-                params.logHooks.warn(`gmail watcher not started: ${gmailResult.reason}`);
++            else {
++                params.logHooks.info(`[gmail] disabled reason=${gmailResult.reason ?? "unknown"}`);
++                if (gmailResult.reason &&
++                    gmailResult.reason !== "hooks not enabled" &&
++                    gmailResult.reason !== "no gmail account configured") {
++                    params.logHooks.warn(`gmail watcher not started: ${gmailResult.reason}`);
++                }
+             }
+         }
+         catch (err) {
+--- /home/rotemgrosman/jarvis-stack/jarvis-data/backups/voice-tts-20260208-195152/dist/config/schema.js	2026-02-05 15:50:07.271797583 +0200
++++ /home/rotemgrosman/.npm-global/lib/node_modules/clawdbot/dist/config/schema.js	2026-02-08 19:51:17.136402201 +0200
+@@ -251,6 +251,9 @@
+     "channels.msteams": "MS Teams",
+     "channels.telegram.botToken": "Telegram Bot Token",
+     "channels.telegram.dmPolicy": "Telegram DM Policy",
++    "channels.telegram.voiceReplyMode": "Telegram Voice Reply Mode",
++    "channels.telegram.voiceReplyMaxWords": "Telegram Voice Reply Max Words",
++    "channels.telegram.voiceReplyOverLimitBehavior": "Telegram Voice Reply Over-Limit Behavior",
+     "channels.telegram.streamMode": "Telegram Draft Stream Mode",
+     "channels.telegram.draftChunk.minChars": "Telegram Draft Chunk Min Chars",
+     "channels.telegram.draftChunk.maxChars": "Telegram Draft Chunk Max Chars",
+@@ -473,6 +476,9 @@
+     "messages.ackReactionScope": 'When to send ack reactions ("group-mentions", "group-all", "direct", "all").',
+     "messages.inbound.debounceMs": "Debounce window (ms) for batching rapid inbound messages from the same sender (0 to disable).",
+     "channels.telegram.dmPolicy": 'Direct message access control ("pairing" recommended). "open" requires channels.telegram.allowFrom=["*"].',
++    "channels.telegram.voiceReplyMode": 'Voice reply policy for Telegram: "voice_on_voice" sends voice replies only when inbound audio is present; "always_voice" forces voice replies; "never_voice" disables voice replies.',
++    "channels.telegram.voiceReplyMaxWords": "Max words allowed for Telegram voice replies before falling back to text (default: 250).",
++    "channels.telegram.voiceReplyOverLimitBehavior": 'Over-limit behavior for Telegram voice replies ("text" or "summarize_then_voice"). Default: "text".',
+     "channels.telegram.streamMode": "Draft streaming mode for Telegram replies (off | partial | block). Separate from block streaming; requires private topics + sendMessageDraft.",
+     "channels.telegram.draftChunk.minChars": 'Minimum chars before emitting a Telegram draft update when channels.telegram.streamMode="block" (default: 200).',
+     "channels.telegram.draftChunk.maxChars": 'Target max size for a Telegram draft update chunk when channels.telegram.streamMode="block" (default: 800; clamped to channels.telegram.textChunkLimit).',

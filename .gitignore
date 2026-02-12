@@ -42,3 +42,10 @@ coverage/
 
 # Safety: do not commit local overrides
 *.local
+
+# Python
+__pycache__/
+*.pyc
+
+# Local memory/work
+memory/
