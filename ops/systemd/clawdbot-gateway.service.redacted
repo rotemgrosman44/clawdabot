@@ -1,0 +1,19 @@
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart="/usr/bin/node" "/home/rotemgrosman/.npm-global/lib/node_modules/clawdbot/dist/entry.js" gateway --port 18789
+Restart=always
+RestartSec=5
+KillMode=process
+Environment="HOME=/home/rotemgrosman"
+Environment="PATH=<redacted-path-list>"
+Environment=CLAWDBOT_GATEWAY_PORT=18789
+Environment="CLAWDBOT_SYSTEMD_UNIT=clawdbot-gateway.service"
+Environment=CLAWDBOT_SERVICE_MARKER=clawdbot
+Environment=CLAWDBOT_SERVICE_KIND=gateway
+Environment=CLAWDBOT_SERVICE_VERSION=2026.1.24-3
+
+[Install]
+WantedBy=default.target
