@@ -16,7 +16,11 @@ Relevant files:
 
 ## Schedule
 
-The timer is intended to run at 09:00, 12:00, 15:00, 18:00 in `Asia/Jerusalem`.
+The authoritative schedule is whatever is defined in the systemd timer file.
+
+Observed in this deployment (see `systemctl --user cat clawdbot-gmail-triage.timer`):
+
+- `OnCalendar=Sun,Mon,Tue,Wed,Thu *-*-* 14:00:00`
 
 Verify the timer definition:
 
@@ -91,4 +95,3 @@ Quick check (no email subjects):
 ```bash
 ls -t /home/rotemgrosman/jarvis-stack/jarvis-data/gmail-triage/reports/gmail-triage-*.json | head -n 3
 ```
-
