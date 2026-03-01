@@ -17,3 +17,6 @@
 ## Evidence
 - Screenshot bundle: <path to screenshots>
 - API probe note: <redacted snippet>
+
+## Audit note
+- UI reports 27 jobs, but only 24 jobs were visible during this capture (API rate limit and/or UI sync suspected). Registry was populated with the 24 captured entries. No consolidation actions were taken.
